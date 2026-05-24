@@ -9,9 +9,10 @@ app.secret_key = "sakaniyet-2025-secret-key"
 ADMIN_USER = "admin"
 ADMIN_PASS = hashlib.sha256("admin2025".encode()).hexdigest()
 
-DATA_FILE   = os.path.join(os.path.dirname(__file__), "data.xlsx")
-USERS_FILE  = os.path.join(os.path.dirname(__file__), "users.json")
-EDITS_FILE  = os.path.join(os.path.dirname(__file__), "edits.json")
+BASE_DIR    = "/home/brmarche"
+DATA_FILE   = os.path.join(BASE_DIR, "data.xlsx")
+USERS_FILE  = os.path.join(BASE_DIR, "users.json")
+EDITS_FILE  = os.path.join(BASE_DIR, "edits.json")
 
 COL_RENAME = {
     "ر,ت":                                          "rt",
@@ -70,7 +71,6 @@ except Exception as e:
     DF = pd.DataFrame()
     print(f"[خطأ] {e}")
 
-# ── overrides تعديلات القاطنين (في الذاكرة + ملف) ──────────────────────────
 def load_edits():
     if os.path.exists(EDITS_FILE):
         with open(EDITS_FILE, "r", encoding="utf-8") as f:
@@ -81,7 +81,7 @@ def save_edits(edits):
     with open(EDITS_FILE, "w", encoding="utf-8") as f:
         json.dump(edits, f, ensure_ascii=False, indent=2)
 
-EDITS = load_edits()   # key = "gresa|makhzani"
+EDITS = load_edits()
 
 def row_key(h):
     return f"{h.get('gresa','')}__{h.get('makhzani','')}"
@@ -93,7 +93,6 @@ def apply_edits(row_dict):
         row_dict["_edit_log"] = EDITS[k].get("log", [])
     return row_dict
 
-# ── USERS (مدراء المؤسسات) ──────────────────────────────────────────────────
 def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -104,9 +103,8 @@ def save_users(users):
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
 
-USERS = load_users()   # {username: {password_hash, gresa, num_bail, name, approved, created_at}}
+USERS = load_users()
 
-# ── helpers ──────────────────────────────────────────────────────────────────
 def logged_in():
     return session.get("user") == ADMIN_USER
 
@@ -135,18 +133,18 @@ def api_login():
     data = request.get_json()
     u = (data.get("username") or "").strip()
     p = hashlib.sha256((data.get("password") or "").encode()).hexdigest()
-    # admin
     if u == ADMIN_USER and p == ADMIN_PASS:
         session["user"] = u
         return jsonify({"ok": True, "role": "admin"})
-    # institution user
     if u in USERS:
         usr = USERS[u]
         if usr.get("password") == p:
             if not usr.get("approved"):
                 return jsonify({"ok": False, "msg": "حسابك في انتظار موافقة المدير"}), 403
             session["user"] = u
-            return jsonify({"ok": True, "role": "institution", "gresa": usr.get("gresa"), "name": usr.get("name")})
+            return jsonify({"ok": True, "role": "institution",
+                            "gresa": usr.get("gresa"), "name": usr.get("name"),
+                            "can_edit": usr.get("can_edit", False)})
         return jsonify({"ok": False, "msg": "كلمة المرور غير صحيحة"}), 401
     return jsonify({"ok": False, "msg": "اسم المستخدم غير موجود"}), 401
 
@@ -165,10 +163,10 @@ def api_me():
     if u in USERS and USERS[u].get("approved"):
         usr = USERS[u]
         return jsonify({"logged": True, "user": u, "role": "institution",
-                        "gresa": usr.get("gresa"), "name": usr.get("name")})
+                        "gresa": usr.get("gresa"), "name": usr.get("name"),
+                        "can_edit": usr.get("can_edit", False)})
     return jsonify({"logged": False})
 
-# ── REGISTER (مدير مؤسسة يطلب حساباً) ──────────────────────────────────────
 @app.route("/api/register", methods=["POST"])
 def api_register():
     global USERS
@@ -186,12 +184,10 @@ def api_register():
     if username in USERS:
         return jsonify({"ok": False, "msg": "اسم المستخدم موجود مسبقاً"}), 400
 
-    # التحقق من أن GRESA و num_bail موجودان في البيانات
     if not DF.empty:
         match = DF[DF["gresa"].str.strip() == gresa]
         if match.empty:
             return jsonify({"ok": False, "msg": f"كود GRESA '{gresa}' غير موجود في قاعدة البيانات"}), 400
-        # التحقق من رقم التأجير
         bail_match = match[match["num_bail"].str.strip() == num_bail]
         if bail_match.empty:
             return jsonify({"ok": False, "msg": "رقم التأجير غير مطابق لكود GRESA المدخل"}), 400
@@ -201,13 +197,15 @@ def api_register():
         "gresa": gresa,
         "num_bail": num_bail,
         "name": name,
+        "phone": "",
+        "email": "",
         "approved": False,
+        "can_edit": False,
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     save_users(USERS)
     return jsonify({"ok": True, "msg": "تم إرسال طلبك، بانتظار موافقة المدير"})
 
-# ── ADMIN: إدارة المستخدمين ──────────────────────────────────────────────────
 @app.route("/api/admin/users")
 def api_admin_users():
     if not is_admin():
@@ -220,6 +218,7 @@ def api_admin_users():
             "gresa": udata.get("gresa",""),
             "num_bail": udata.get("num_bail",""),
             "approved": udata.get("approved", False),
+            "can_edit": udata.get("can_edit", False),
             "created_at": udata.get("created_at",""),
         })
     return jsonify(result)
@@ -231,7 +230,7 @@ def api_admin_approve():
         return jsonify({"error": "unauthorized"}), 401
     data = request.get_json()
     uname = data.get("username","")
-    action = data.get("action","approve")   # approve | reject | delete
+    action = data.get("action","approve")
     if uname not in USERS:
         return jsonify({"ok": False, "msg": "المستخدم غير موجود"}), 404
     if action == "approve":
@@ -240,6 +239,46 @@ def api_admin_approve():
         USERS[uname]["approved"] = False
     elif action == "delete":
         del USERS[uname]
+    save_users(USERS)
+    return jsonify({"ok": True})
+
+@app.route("/api/admin/set_edit_permission", methods=["POST"])
+def api_set_edit_permission():
+    global USERS
+    if not is_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json()
+    usernames = data.get("usernames", [])
+    can_edit  = data.get("can_edit", False)
+    updated = 0
+    for uname in usernames:
+        if uname in USERS:
+            USERS[uname]["can_edit"] = can_edit
+            updated += 1
+    save_users(USERS)
+    return jsonify({"ok": True, "updated": updated})
+
+# ── الملف الشخصي للمستخدم ──────────────────────────────────────────────────
+@app.route("/api/profile", methods=["GET","POST"])
+def api_profile():
+    global USERS
+    u = current_user()
+    if not u or u == ADMIN_USER:
+        return jsonify({"error": "unauthorized"}), 401
+    if u not in USERS:
+        return jsonify({"error": "not found"}), 404
+    if request.method == "GET":
+        usr = USERS[u]
+        return jsonify({
+            "name":     usr.get("name",""),
+            "gresa":    usr.get("gresa",""),
+            "num_bail": usr.get("num_bail",""),
+            "phone":    usr.get("phone",""),
+            "email":    usr.get("email",""),
+        })
+    data = request.get_json()
+    USERS[u]["phone"] = (data.get("phone") or "").strip()
+    USERS[u]["email"] = (data.get("email") or "").strip()
     save_users(USERS)
     return jsonify({"ok": True})
 
@@ -254,7 +293,6 @@ def api_stats():
     if DF.empty:
         return jsonify({"institutions": 0, "housing": 0, "occupied": 0, "vacant": 0, "occupied_illegal": 0})
 
-    # مدير المؤسسة يرى إحصائيات مؤسسته فقط
     if is_institution_user():
         gresa = get_inst_gresa()
         df = DF[DF["gresa"].str.strip() == gresa]
@@ -370,12 +408,16 @@ def api_occupied_illegal():
     rows = [apply_edits(h) for h in df[mask].to_dict(orient="records")]
     return jsonify({"illegal": rows, "total": len(rows)})
 
-# ── تعديل القاطن (أدمين فقط) ────────────────────────────────────────────────
 @app.route("/api/edit_occupant", methods=["POST"])
 def api_edit_occupant():
     global EDITS
-    if not is_admin():
+    u = current_user()
+    if not u:
         return jsonify({"error": "unauthorized"}), 401
+    if u != ADMIN_USER:
+        if u not in USERS or not USERS[u].get("can_edit"):
+            return jsonify({"error": "unauthorized", "msg": "ليس لديك صلاحية التعديل"}), 401
+
     data = request.get_json()
     gresa    = data.get("gresa","").strip()
     makhzani = data.get("makhzani","").strip()
@@ -383,7 +425,6 @@ def api_edit_occupant():
 
     key = f"{gresa}__{makhzani}"
 
-    # تحقق أن السكنية موجودة
     match = DF[(DF["gresa"].str.strip() == gresa) & (DF["makhzani"].str.strip() == makhzani)]
     if match.empty:
         return jsonify({"ok": False, "msg": "السكنية غير موجودة"}), 404
@@ -391,7 +432,7 @@ def api_edit_occupant():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = {
         "timestamp": now,
-        "admin": ADMIN_USER,
+        "admin": u,
         "changes": fields
     }
 
@@ -473,7 +514,6 @@ body {
   overflow-x: hidden;
 }
 
-/* Noise texture overlay */
 body::before {
   content: '';
   position: fixed;
@@ -483,7 +523,6 @@ body::before {
   z-index: 0;
 }
 
-/* ─── GLOW ORBS ─── */
 .orb {
   position: fixed;
   border-radius: 50%;
@@ -496,7 +535,6 @@ body::before {
 .orb-2 { width: 400px; height: 400px; background: radial-gradient(circle, #065f46 0%, transparent 70%); bottom: -100px; left: -80px; }
 .orb-3 { width: 300px; height: 300px; background: radial-gradient(circle, #7c3aed 0%, transparent 70%); top: 40%; left: 30%; opacity: 0.15; }
 
-/* ─── SIDEBAR ─── */
 .sb {
   position: fixed; top: 0; right: 0;
   width: 70px; height: 100vh;
@@ -543,10 +581,8 @@ body::before {
 .ni.logout { color: #f87171; }
 .ni.logout:hover { background: rgba(248,113,113,0.1); border-right-color: var(--red); }
 
-/* ─── MAIN ─── */
 .main { margin-right: 70px; min-height: 100vh; display: flex; flex-direction: column; position: relative; z-index: 1; }
 
-/* ─── TOPBAR ─── */
 .tb {
   background: rgba(8,14,26,0.7);
   backdrop-filter: blur(20px);
@@ -562,7 +598,6 @@ body::before {
 .tb-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .tb-right { display: flex; align-items: center; gap: 12px; }
 
-/* User chip */
 .uc-wrap { position: relative; }
 .uc {
   display: flex; align-items: center; gap: 8px;
@@ -598,14 +633,16 @@ body::before {
 .uc-menu-item.danger:hover { background: var(--red-bg); }
 .uc-menu-sep { height: 1px; background: var(--border); }
 
-/* ─── CONTENT ─── */
 .ct { padding: 1.75rem 2rem 6rem; flex: 1; }
 
-/* ─── STAT CARDS ─── */
+/* ══ STAT GRID — 5 columns, illegal card in same row ══ */
 .sg {
-  display: grid; grid-template-columns: repeat(4,1fr);
-  gap: 14px; margin-bottom: 1.75rem;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 14px;
+  margin-bottom: 1.75rem;
 }
+
 .sc {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -649,8 +686,8 @@ body::before {
   text-transform: uppercase;
 }
 .sc.clickable:hover .sc-hint { display: block; }
+.sc.c-red.clickable:hover .sc-hint { color: var(--red); }
 
-/* ─── SEARCH BOX ─── */
 .sb-box {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); padding: 1.5rem; margin-bottom: 1.5rem;
@@ -682,11 +719,12 @@ body::before {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
+/* FIX: autocomplete z-index must be above everything */
 .ac {
   position: absolute; top: calc(100% + 6px); right: 0; left: 0;
   background: var(--surface); border: 1px solid var(--border2);
-  border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,0.4);
-  z-index: 99; display: none; max-height: 280px; overflow-y: auto;
+  border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+  z-index: 9999; display: none; max-height: 280px; overflow-y: auto;
 }
 .aci {
   padding: 11px 16px; cursor: pointer; font-size: 13.5px;
@@ -697,7 +735,6 @@ body::before {
 .aci:hover, .aci.hi { background: var(--primary-lt); color: var(--primary); }
 .aci i { color: var(--primary); font-size: 16px; flex-shrink: 0; }
 
-/* ─── INSTITUTION CARD ─── */
 .inst-card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); margin-bottom: 1.5rem;
@@ -739,7 +776,6 @@ body::before {
 .ist .n { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; }
 .ist .l { font-size: 11px; color: var(--muted); margin-top: 3px; }
 
-/* ─── TABLE CARD ─── */
 .ic-card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); margin-bottom: 1.5rem;
@@ -773,7 +809,6 @@ tr:last-child td { border-bottom: none; }
 tr.hr td { transition: background 0.12s; }
 tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 
-/* BADGES */
 .badge { padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; }
 .bg { background: var(--green-bg); color: var(--green); border: 1px solid rgba(16,185,129,0.2); }
 .ba { background: var(--amber-bg); color: var(--amber); border: 1px solid rgba(245,158,11,0.2); }
@@ -792,7 +827,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 .btn-sm.edit { background: var(--violet-bg); color: var(--violet); border-color: rgba(139,92,246,0.3); }
 .btn-sm.edit:hover { background: var(--violet); color: #fff; }
 
-/* ─── STATS PANEL ─── */
 .stats-panel {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); margin-bottom: 1.5rem;
@@ -820,7 +854,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 .sp-table tr:last-child td { border-bottom: none; }
 .sp-full { grid-column: 1/-1; }
 
-/* ─── ADMIN PANEL ─── */
 .admin-panel {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); margin-bottom: 1.5rem;
@@ -851,7 +884,7 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 .user-info { flex: 1; min-width: 0; }
 .user-name { font-size: 13.5px; font-weight: 700; }
 .user-meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-.user-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.user-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
 
 .btn-approve { background: var(--green-bg); color: var(--green); border-color: rgba(16,185,129,0.3); }
 .btn-approve:hover { background: var(--green); color: #fff; }
@@ -866,7 +899,21 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.6} }
 
-/* ─── MODAL ─── */
+.edit-perm-badge {
+  background: rgba(139,92,246,0.15); color: var(--violet);
+  border: 1px solid rgba(139,92,246,0.3);
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 10px; font-weight: 700;
+}
+
+.bulk-bar {
+  padding: .9rem 1.4rem;
+  background: rgba(139,92,246,0.05);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.bulk-bar span { font-size: 12px; color: var(--muted); font-weight: 700; }
+
 .ov {
   position: fixed; inset: 0;
   background: rgba(0,0,0,0.7);
@@ -900,7 +947,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 .cx:hover { background: var(--red-bg); color: var(--red); }
 .mob { padding: 1.4rem; overflow-y: auto; flex: 1; }
 
-/* Occupant info */
 .occ-header {
   background: linear-gradient(135deg, #040d1a, #0f2040);
   border-radius: 12px; padding: 1.2rem 1.3rem;
@@ -926,7 +972,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 .df .dv { font-size: 13.5px; font-weight: 600; color: var(--text); word-break: break-word; }
 .df.full { grid-column: 1/-1; }
 
-/* Edit form */
 .ef-input {
   width: 100%; padding: 9px 12px;
   background: var(--bg2); border: 1.5px solid var(--border2);
@@ -936,7 +981,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 }
 .ef-input:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(139,92,246,0.15); }
 
-/* Edit log */
 .log-entry {
   padding: 10px 12px;
   background: var(--surface2); border: 1px solid var(--border);
@@ -946,7 +990,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 .log-field { color: var(--violet); font-weight: 700; }
 .log-val { color: var(--text); }
 
-/* ─── LOGIN ─── */
 .login-ov {
   position: fixed; inset: 0;
   background: var(--bg);
@@ -1026,7 +1069,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
   background: var(--green-bg); padding: 8px; border-radius: 8px;
 }
 
-/* ─── FAB ─── */
 .fab-home {
   position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
   display: none; align-items: center; gap: 8px;
@@ -1040,14 +1082,12 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 .fab-home.show { display: flex; }
 .fab-home:hover { background: var(--primary); border-color: var(--primary); transform: translateX(-50%) translateY(-3px); box-shadow: 0 12px 40px var(--primary-glow); }
 
-/* ─── EMPTY STATE ─── */
 .empty {
   text-align: center; padding: 4rem 2rem; color: var(--muted);
 }
 .empty i { font-size: 52px; display: block; margin-bottom: 1rem; opacity: 0.4; }
 .empty p { font-size: 14px; }
 
-/* ─── TOAST ─── */
 .toast {
   position: fixed; bottom: 24px; right: 24px;
   background: var(--surface); border: 1px solid var(--border2);
@@ -1062,6 +1102,45 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 .toast.success { border-color: rgba(16,185,129,0.4); color: var(--green); }
 .toast.error { border-color: rgba(239,68,68,0.4); color: var(--red); }
 
+/* Profile panel */
+.profile-panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); margin-bottom: 1.5rem;
+  overflow: hidden; animation: fadeUp 0.35s ease;
+}
+.profile-header {
+  padding: 1.5rem 1.6rem;
+  background: linear-gradient(135deg, #040d1a 0%, #0f2040 60%, #1a3a6b 100%);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 1.2rem;
+  position: relative; overflow: hidden;
+}
+.profile-header::before {
+  content: ''; position: absolute; top: -40px; left: -40px;
+  width: 200px; height: 200px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(139,92,246,0.2), transparent 70%);
+}
+.profile-av {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: rgba(139,92,246,0.15); border: 2px solid rgba(139,92,246,0.35);
+  color: var(--violet); display: flex; align-items: center;
+  justify-content: center; font-size: 28px; flex-shrink: 0;
+  box-shadow: 0 0 20px rgba(139,92,246,0.25);
+}
+.profile-name { font-size: 17px; font-weight: 800; color: #fff; margin-bottom: 4px; }
+.profile-sub { font-size: 12px; color: rgba(255,255,255,0.5); }
+.profile-body { padding: 1.5rem 1.6rem; }
+.readonly-notice {
+  background: rgba(59,130,246,0.07); border: 1px solid rgba(59,130,246,0.18);
+  border-radius: 8px; padding: 9px 14px; margin-bottom: 1.2rem;
+  font-size: 12px; color: var(--muted2); display: flex; align-items: center; gap: 8px;
+}
+.editable-notice {
+  background: rgba(139,92,246,0.07); border: 1px solid rgba(139,92,246,0.2);
+  border-radius: 8px; padding: 9px 14px; margin: 1.2rem 0 1rem;
+  font-size: 12px; color: var(--violet); display: flex; align-items: center; gap: 8px;
+}
+
 @media(max-width:768px) {
   .sg { grid-template-columns: 1fr 1fr; }
   .sb { display: none; } .main { margin-right: 0; }
@@ -1070,7 +1149,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
   .sp-body { grid-template-columns: 1fr 1fr; }
 }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--surface2); }
 ::-webkit-scrollbar-thumb { background: var(--surface3); border-radius: 3px; }
@@ -1079,7 +1157,6 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 </head>
 <body>
 
-<!-- ORBS -->
 <div class="orb orb-1"></div>
 <div class="orb orb-2"></div>
 <div class="orb orb-3"></div>
@@ -1094,13 +1171,12 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
         <p>مصلحة البناءات والتجهيز والممتلكات<br>المديرية الإقليمية إنزكان آيت ملول</p>
       </div>
 
-      <!-- Tabs -->
       <div class="tabs-login">
-        <button class="tab-btn on" onclick="switchLoginTab('login',this)" id="tabBtnLogin">تسجيل الدخول</button>
-        <button class="tab-btn" onclick="switchLoginTab('register',this)" id="tabBtnReg">طلب حساب جديد</button>
+        <button class="tab-btn on" onclick="switchLoginTab('login',this)">تسجيل الدخول</button>
+        <button class="tab-btn" onclick="switchLoginTab('register',this)">طلب حساب جديد</button>
       </div>
 
-      <!-- LOGIN FORM -->
+      <!-- LOGIN -->
       <div id="loginForm">
         <div class="lf">
           <label>اسم المستخدم</label>
@@ -1111,13 +1187,13 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
           <input type="password" id="liP" placeholder="••••••••" autocomplete="current-password"
                  onkeydown="if(event.key==='Enter')doLogin()"/>
         </div>
-        <button class="btn-login" onclick="doLogin()">
+        <button class="btn-login" id="btnLogin" onclick="doLogin()">
           <i class="bi bi-arrow-left-circle"></i> دخول
         </button>
         <div class="login-err" id="liErr"></div>
       </div>
 
-      <!-- REGISTER FORM -->
+      <!-- REGISTER -->
       <div id="registerForm" style="display:none">
         <div class="lf">
           <label>الاسم الكامل (رئيس المؤسسة)</label>
@@ -1141,7 +1217,7 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
           <label>كلمة المرور</label>
           <input type="password" id="regPass" placeholder="كلمة مرور قوية"/>
         </div>
-        <button class="btn-login" style="background:linear-gradient(135deg,#5b21b6,#8b5cf6);box-shadow:0 4px 20px rgba(139,92,246,0.35)" onclick="doRegister()">
+        <button class="btn-login" id="btnRegister" style="background:linear-gradient(135deg,#5b21b6,#8b5cf6);box-shadow:0 4px 20px rgba(139,92,246,0.35)" onclick="doRegister()">
           <i class="bi bi-person-plus"></i> إرسال الطلب
         </button>
         <div class="login-err" id="regErr"></div>
@@ -1154,15 +1230,15 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 <!-- ═══ SIDEBAR ═══ -->
 <nav class="sb" id="sideNav">
   <div class="sb-logo"><i class="bi bi-buildings-fill"></i></div>
-  <div class="ni on" onclick="showTab('home',this)"><i class="bi bi-house-door"></i><span class="nl">السكنيات</span></div>
-  <div class="ni" onclick="showTab('stats',this)" id="navStats"><i class="bi bi-bar-chart-line"></i><span class="nl">الإحصائيات</span></div>
+  <div class="ni on" id="navHome" onclick="goHome()"><i class="bi bi-house-door"></i><span class="nl">السكنيات</span></div>
+  <div class="ni" onclick="showTab('stats',this)"><i class="bi bi-bar-chart-line"></i><span class="nl">الإحصائيات</span></div>
   <div class="ni" onclick="showTab('admin',this)" id="navAdmin" style="display:none"><i class="bi bi-shield-check"></i><span class="nl">إدارة المستخدمين</span></div>
+  <div class="ni" onclick="showTab('profile',this)" id="navProfile" style="display:none"><i class="bi bi-person-circle"></i><span class="nl">ملفي الشخصي</span></div>
   <div class="ni bot logout" onclick="doLogout()"><i class="bi bi-box-arrow-left"></i><span class="nl">تسجيل الخروج</span></div>
 </nav>
 
 <!-- ═══ MAIN ═══ -->
 <div class="main">
-  <!-- TOPBAR -->
   <div class="tb">
     <div class="tb-brand">
       <div class="dot"></div>
@@ -1182,6 +1258,10 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
         <div class="uc-menu" id="ucMenu">
           <div class="uc-menu-item"><i class="bi bi-person-badge"></i><span id="menuUserInfo">—</span></div>
           <div class="uc-menu-sep"></div>
+          <div class="uc-menu-item" id="menuProfileLink" style="display:none" onclick="showTab('profile',null);document.getElementById('ucWrap').classList.remove('open')">
+            <i class="bi bi-person-circle"></i><span>ملفي الشخصي</span>
+          </div>
+          <div class="uc-menu-sep" id="menuProfileSep" style="display:none"></div>
           <div class="uc-menu-item danger" onclick="doLogout()">
             <i class="bi bi-box-arrow-left"></i><span>تسجيل الخروج</span>
           </div>
@@ -1190,34 +1270,37 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
     </div>
   </div>
 
-  <!-- CONTENT -->
   <div class="ct">
-    <!-- STAT CARDS -->
+    <!-- ══ STAT CARDS — 5 in same row ══ -->
     <div class="sg">
-      <div class="sc c-blue"><div class="si b"><i class="bi bi-building"></i></div>
-        <div><div class="sn" id="s1">—</div><div class="sl">المؤسسات</div></div></div>
-      <div class="sc c-blue"><div class="si b"><i class="bi bi-house-door"></i></div>
-        <div><div class="sn" id="s2">—</div><div class="sl">إجمالي السكنيات</div></div></div>
-      <div class="sc c-green"><div class="si g"><i class="bi bi-person-check"></i></div>
-        <div><div class="sn" id="s3">—</div><div class="sl">مشغولة / مستعملة</div></div></div>
-      <div class="sc c-amber clickable" onclick="openVacantModal()" title="عرض الشاغرة">
+      <div class="sc c-blue">
+        <div class="si b"><i class="bi bi-building"></i></div>
+        <div><div class="sn" id="s1">—</div><div class="sl">المؤسسات</div></div>
+      </div>
+      <div class="sc c-blue">
+        <div class="si b"><i class="bi bi-house-door"></i></div>
+        <div><div class="sn" id="s2">—</div><div class="sl">إجمالي السكنيات</div></div>
+      </div>
+      <div class="sc c-green">
+        <div class="si g"><i class="bi bi-person-check"></i></div>
+        <div><div class="sn" id="s3">—</div><div class="sl">مستعملة للسكن</div></div>
+      </div>
+      <div class="sc c-amber clickable" onclick="openVacantModal()">
         <div class="si a"><i class="bi bi-house-x"></i></div>
         <div>
           <div class="sn" id="s4">—</div><div class="sl">شاغرة</div>
           <div class="sc-hint"><i class="bi bi-eye"></i> عرض القائمة</div>
         </div>
       </div>
-    </div>
-
-    <!-- بطاقة المحتلة -->
-    <div class="sc c-red clickable" style="margin-bottom:1.5rem;display:none" id="illegalCard" onclick="openIllegalModal()">
-      <div class="si r"><i class="bi bi-exclamation-triangle"></i></div>
-      <div style="flex:1">
-        <div class="sn" id="s5" style="color:var(--red)">—</div>
-        <div class="sl">سكنيات محتلة (غير مرخصة)</div>
-        <div class="sc-hint"><i class="bi bi-eye"></i> عرض القائمة</div>
+      <!-- البطاقة الحمراء في نفس الصف -->
+      <div class="sc c-red clickable" id="illegalCard" style="display:none" onclick="openIllegalModal()">
+        <div class="si r"><i class="bi bi-exclamation-triangle"></i></div>
+        <div>
+          <div class="sn" id="s5" style="color:var(--red)">—</div>
+          <div class="sl">سكنيات محتلة</div>
+          <div class="sc-hint"><i class="bi bi-eye"></i> عرض القائمة</div>
+        </div>
       </div>
-      <div style="color:var(--red);opacity:0.4;font-size:40px"><i class="bi bi-shield-exclamation"></i></div>
     </div>
 
     <!-- HOME TAB -->
@@ -1259,6 +1342,22 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
         </div>
         <div id="adminUsersList">
           <div class="empty"><i class="bi bi-people"></i><p>جاري التحميل...</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PROFILE TAB -->
+    <div id="tabProfile" style="display:none">
+      <div class="profile-panel">
+        <div class="profile-header">
+          <div class="profile-av"><i class="bi bi-person-circle"></i></div>
+          <div>
+            <div class="profile-name" id="profHeaderName">—</div>
+            <div class="profile-sub" id="profHeaderGresa">—</div>
+          </div>
+        </div>
+        <div class="profile-body" id="profileContent">
+          <div class="empty"><i class="bi bi-hourglass"></i><p>جاري التحميل...</p></div>
         </div>
       </div>
     </div>
@@ -1330,7 +1429,7 @@ tr.hr:hover td { background: rgba(59,130,246,0.06); cursor: pointer; }
 
 <script>
 /* ══ STATE ══ */
-let _role = null, _currentH = null, _editMode = false;
+let _role = null, _canEdit = false, _currentH = null, _editMode = false;
 let _vacantAll = [], _illegalAll = [];
 
 /* ══ USER MENU ══ */
@@ -1340,54 +1439,71 @@ document.addEventListener('click', e => {
   if(w && !w.contains(e.target)) w.classList.remove('open');
 });
 
-/* ══ LOGIN TAB ══ */
+/* ══ LOGIN TAB SWITCH ══ */
 function switchLoginTab(tab, el){
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('on'));
   el.classList.add('on');
-  document.getElementById('loginForm').style.display   = tab==='login'    ? '' : 'none';
-  document.getElementById('registerForm').style.display= tab==='register' ? '' : 'none';
+  document.getElementById('loginForm').style.display    = tab==='login'    ? '' : 'none';
+  document.getElementById('registerForm').style.display = tab==='register' ? '' : 'none';
 }
 
-/* ══ AUTH ══ */
+/* ══ LOGIN ══ */
 async function doLogin(){
   const u = document.getElementById('liU').value.trim();
   const p = document.getElementById('liP').value;
-  const btn = document.querySelector('#loginForm .btn-login');
-  btn.disabled = true; btn.textContent = 'جاري التحقق...';
+  if(!u || !p){ showErr('liErr','يرجى إدخال اسم المستخدم وكلمة المرور'); return; }
+  const btn = document.getElementById('btnLogin');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> جاري التحقق...';
   try {
     const r = await fetch('/api/login', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify({username:u, password:p})
     });
     const d = await r.json();
     if(d.ok){
       document.getElementById('loginOv').classList.add('hidden');
       initApp(d);
-    } else { showErr('liErr', d.msg || 'خطأ في تسجيل الدخول'); }
-  } catch(e){ showErr('liErr','تعذر الاتصال بالخادم'); }
+    } else {
+      showErr('liErr', d.msg || 'خطأ في تسجيل الدخول');
+    }
+  } catch(e){
+    showErr('liErr','تعذر الاتصال بالخادم');
+  }
   btn.disabled = false;
   btn.innerHTML = '<i class="bi bi-arrow-left-circle"></i> دخول';
 }
 
+/* ══ REGISTER ══ */
 async function doRegister(){
-  const name    = document.getElementById('regName').value.trim();
-  const gresa   = document.getElementById('regGresa').value.trim();
-  const bail    = document.getElementById('regBail').value.trim();
-  const uname   = document.getElementById('regUser').value.trim();
-  const pass    = document.getElementById('regPass').value;
-  const btn     = document.querySelector('#registerForm .btn-login');
-  btn.disabled = true; btn.textContent = 'جاري الإرسال...';
+  const name  = document.getElementById('regName').value.trim();
+  const gresa = document.getElementById('regGresa').value.trim();
+  const bail  = document.getElementById('regBail').value.trim();
+  const uname = document.getElementById('regUser').value.trim();
+  const pass  = document.getElementById('regPass').value;
+  if(!name||!gresa||!bail||!uname||!pass){ showErr('regErr','يرجى ملء جميع الحقول'); return; }
+  const btn = document.getElementById('btnRegister');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> جاري الإرسال...';
   try {
     const r = await fetch('/api/register', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify({name, gresa, num_bail:bail, username:uname, password:pass})
     });
     const d = await r.json();
     if(d.ok){
-      document.getElementById('regOk').textContent = d.msg; document.getElementById('regOk').style.display = 'block';
+      document.getElementById('regOk').textContent = d.msg;
+      document.getElementById('regOk').style.display = 'block';
       document.getElementById('regErr').style.display = 'none';
-    } else { showErr('regErr', d.msg); document.getElementById('regOk').style.display='none'; }
-  } catch(e){ showErr('regErr','تعذر الاتصال بالخادم'); }
+    } else {
+      showErr('regErr', d.msg);
+      document.getElementById('regOk').style.display = 'none';
+    }
+  } catch(e){
+    showErr('regErr','تعذر الاتصال بالخادم');
+  }
   btn.disabled = false;
   btn.innerHTML = '<i class="bi bi-person-plus"></i> إرسال الطلب';
 }
@@ -1395,97 +1511,104 @@ async function doRegister(){
 function showErr(id, m){
   const el = document.getElementById(id);
   el.textContent = m; el.style.display = 'block';
-  setTimeout(()=>el.style.display='none', 4000);
+  setTimeout(()=>{ el.style.display='none'; }, 4500);
 }
 
 async function doLogout(){
   document.getElementById('ucWrap').classList.remove('open');
   await fetch('/api/logout', {method:'POST'});
-  _role = null;
+  _role = null; _canEdit = false;
   document.getElementById('loginOv').classList.remove('hidden');
   document.getElementById('liP').value = '';
   hideFab(); goHome();
 }
 
-/* ══ INIT ══ */
+/* ══ INIT APP ══ */
 function initApp(d){
-  _role = d.role;
-  document.getElementById('tbUser').textContent = d.role==='admin' ? 'مدير النظام' : (d.name||d.user||'مدير المؤسسة');
+  _role    = d.role;
+  _canEdit = d.role === 'admin' || d.can_edit === true;
+  document.getElementById('tbUser').textContent =
+    d.role==='admin' ? 'مدير النظام' : (d.name || d.user || 'مدير المؤسسة');
   document.getElementById('tbRole').textContent = d.role==='admin' ? 'أدمين' : 'مؤسسة';
   document.getElementById('tbRole').className   = d.role==='admin' ? 'role-badge' : 'role-badge inst';
-  document.getElementById('menuUserInfo').textContent = d.user;
-
-  // show admin nav
-  document.getElementById('navAdmin').style.display = d.role==='admin' ? '' : 'none';
-
-  // إظهار بطاقة المحتلة
+  document.getElementById('menuUserInfo').textContent = d.user || '';
+  document.getElementById('navAdmin').style.display   = d.role==='admin'       ? '' : 'none';
+  document.getElementById('navProfile').style.display = d.role==='institution' ? '' : 'none';
+  document.getElementById('menuProfileLink').style.display = d.role==='institution' ? '' : 'none';
+  document.getElementById('menuProfileSep').style.display  = d.role==='institution' ? '' : 'none';
   document.getElementById('illegalCard').style.display = '';
-
-  // edit button
-  document.getElementById('btnEdit').style.display = d.role==='admin' ? '' : 'none';
-
-  // if institution user, auto-load their institution
-  if(d.role==='institution' && d.gresa){
-    // search will be filtered server-side
-  }
-
+  document.getElementById('btnEdit').style.display = _canEdit ? '' : 'none';
   loadStats();
 }
 
+/* ══ STATS ══ */
 async function loadStats(){
-  const r = await fetch('/api/stats');
-  if(r.status===401){ document.getElementById('loginOv').classList.remove('hidden'); return; }
-  const d = await r.json();
-  document.getElementById('s1').textContent = d.institutions;
-  document.getElementById('s2').textContent = d.housing;
-  document.getElementById('s3').textContent = d.occupied;
-  document.getElementById('s4').textContent = d.vacant;
-  document.getElementById('s5').textContent = d.occupied_illegal || 0;
-  window._statsData = d;
-  renderStats();
+  try {
+    const r = await fetch('/api/stats');
+    if(r.status===401){ document.getElementById('loginOv').classList.remove('hidden'); return; }
+    const d = await r.json();
+    document.getElementById('s1').textContent = d.institutions  || 0;
+    document.getElementById('s2').textContent = d.housing       || 0;
+    document.getElementById('s3').textContent = d.occupied      || 0;
+    document.getElementById('s4').textContent = d.vacant        || 0;
+    document.getElementById('s5').textContent = d.occupied_illegal || 0;
+    window._statsData = d;
+    renderStats();
+  } catch(e){ console.error('stats error', e); }
 }
 
+/* ══ AUTO-LOGIN CHECK ══ */
 fetch('/api/me').then(r=>r.json()).then(d=>{
   if(d.logged){
     document.getElementById('loginOv').classList.add('hidden');
     initApp(d);
-    // if institution user, auto-search
     if(d.role==='institution' && d.gresa){
       document.getElementById('si').value = d.gresa;
       onSI();
     }
   }
-});
+}).catch(e => console.error('me check error', e));
 
 /* ══ TABS ══ */
 let currentTab = 'home';
 function showTab(t, el){
-  ['home','stats','admin'].forEach(x=>{
-    document.getElementById('tab'+x.charAt(0).toUpperCase()+x.slice(1)).style.display = t===x ? '' : 'none';
+  ['Home','Stats','Admin','Profile'].forEach(x=>{
+    document.getElementById('tab'+x).style.display = t===x.toLowerCase() ? '' : 'none';
   });
   document.querySelectorAll('.ni').forEach(n=>n.classList.remove('on'));
   if(el) el.classList.add('on');
   currentTab = t;
-  if(t==='stats') renderStats();
-  if(t==='admin') loadAdminUsers();
+  if(t==='stats')   renderStats();
+  if(t==='admin')   loadAdminUsers();
+  if(t==='profile') loadProfile();
 }
 
 /* ══ FAB ══ */
 function showFab(){ document.getElementById('fabHome').classList.add('show'); }
 function hideFab(){ document.getElementById('fabHome').classList.remove('show'); }
+
 function goHome(){
   document.getElementById('si').value = '';
   document.getElementById('res').innerHTML =
     '<div class="empty"><i class="bi bi-search"></i><p>ابحث عن مؤسسة لعرض السكنيات المرتبطة بها</p></div>';
   hideFab();
-  if(currentTab!=='home') showTab('home', document.querySelector('.ni'));
+  ['Home','Stats','Admin','Profile'].forEach(x=>{
+    document.getElementById('tab'+x).style.display = x==='Home' ? '' : 'none';
+  });
+  document.querySelectorAll('.ni').forEach(n=>n.classList.remove('on'));
+  document.getElementById('navHome').classList.add('on');
+  currentTab = 'home';
   window.scrollTo({top:0, behavior:'smooth'});
 }
 
-/* ══ STATS ══ */
+/* ══ RENDER STATS ══ */
 function renderStats(){
   const d = window._statsData;
-  if(!d){ document.getElementById('spBody').innerHTML = '<div class="empty sp-full"><i class="bi bi-exclamation-circle"></i><p>لم يتم تحميل البيانات</p></div>'; return; }
+  if(!d){
+    document.getElementById('spBody').innerHTML =
+      '<div class="empty sp-full"><i class="bi bi-exclamation-circle"></i><p>لم يتم تحميل البيانات</p></div>';
+    return;
+  }
   const pctO=d.rate_occupied||0, pctV=d.rate_vacant||0, pctI=d.rate_illegal||0;
   const typeRows  = Object.entries(d.by_type||{}).map(([k,v])=>
     `<tr><td>${k}</td><td style="font-weight:700;color:var(--primary);font-family:'IBM Plex Mono',monospace">${v}</td></tr>`).join('');
@@ -1533,12 +1656,30 @@ async function loadAdminUsers(){
   const users = await r.json();
   if(!users.length){
     document.getElementById('adminUsersList').innerHTML =
-      '<div class="empty"><i class="bi bi-people"></i><p>لا توجد طلبات حسابات بعد</p></div>'; return;
+      '<div class="empty"><i class="bi bi-people"></i><p>لا توجد طلبات حسابات بعد</p></div>';
+    return;
   }
   const pending  = users.filter(u=>!u.approved);
   const approved = users.filter(u=> u.approved);
 
   let html = '';
+
+  if(approved.length){
+    const allNames = approved.map(u=>`'${u.username}'`).join(',');
+    html += `
+    <div class="bulk-bar">
+      <span><i class="bi bi-people-fill"></i> تحديد الكل (${approved.length} مستخدم نشط):</span>
+      <button class="btn-sm" style="background:var(--violet-bg);color:var(--violet);border-color:rgba(139,92,246,0.3)"
+        onclick="setEditPerm([${allNames}], true)">
+        <i class="bi bi-pencil-fill"></i> COCHER TOUS — منح التعديل للكل
+      </button>
+      <button class="btn-sm" style="background:var(--red-bg);color:var(--red);border-color:rgba(239,68,68,0.3)"
+        onclick="setEditPerm([${allNames}], false)">
+        <i class="bi bi-pencil-slash"></i> سحب التعديل من الكل
+      </button>
+    </div>`;
+  }
+
   if(pending.length){
     html += `<div style="padding:.75rem 1.4rem;background:rgba(245,158,11,0.05);border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--amber);text-transform:uppercase;letter-spacing:1px;display:flex;align-items:center;gap:6px"><i class="bi bi-clock"></i> طلبات في الانتظار (${pending.length})</div>`;
     pending.forEach(u => html += userRow(u));
@@ -1552,11 +1693,16 @@ async function loadAdminUsers(){
 
 function userRow(u){
   const pending = !u.approved;
+  const canEdit = u.can_edit;
   return `<div class="user-row">
-    <div class="user-av" style="background:${pending?'var(--amber-bg)':'var(--green-bg)'}; color:${pending?'var(--amber)':'var(--green)'}">
+    <div class="user-av" style="background:${pending?'var(--amber-bg)':'var(--green-bg)'};color:${pending?'var(--amber)':'var(--green)'}">
       <i class="bi bi-person"></i></div>
     <div class="user-info">
-      <div class="user-name">${u.name} ${pending?'<span class="pending-badge">في الانتظار</span>':''}</div>
+      <div class="user-name" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        ${u.name}
+        ${pending?'<span class="pending-badge">في الانتظار</span>':''}
+        ${(!pending && canEdit)?'<span class="edit-perm-badge"><i class="bi bi-pencil"></i> يملك التعديل</span>':''}
+      </div>
       <div class="user-meta">
         <span style="font-family:'IBM Plex Mono',monospace">${u.username}</span>
         &nbsp;·&nbsp; GRESA: <b>${u.gresa}</b>
@@ -1566,21 +1712,46 @@ function userRow(u){
     </div>
     <div class="user-actions">
       ${pending?`<button class="btn-sm btn-approve" onclick="adminAction('${u.username}','approve')"><i class="bi bi-check-lg"></i> موافقة</button>`:''}
-      ${pending?`<button class="btn-sm btn-reject" onclick="adminAction('${u.username}','reject')"><i class="bi bi-x-lg"></i> رفض</button>`:'<span style="font-size:11px;color:var(--green)"><i class="bi bi-check-circle-fill"></i> نشط</span>'}
-      <button class="btn-sm" onclick="adminAction('${u.username}','delete')" style="background:var(--red-bg);color:var(--red);border-color:rgba(239,68,68,0.3)" title="حذف"><i class="bi bi-trash"></i></button>
+      ${pending?`<button class="btn-sm btn-reject"  onclick="adminAction('${u.username}','reject')"><i class="bi bi-x-lg"></i> رفض</button>`
+               :'<span style="font-size:11px;color:var(--green)"><i class="bi bi-check-circle-fill"></i> نشط</span>'}
+      ${!pending ? `
+        <button class="btn-sm" onclick="setEditPerm(['${u.username}'], ${!canEdit})"
+          style="background:${canEdit?'var(--red-bg)':'var(--violet-bg)'};color:${canEdit?'var(--red)':'var(--violet)'};border-color:${canEdit?'rgba(239,68,68,0.3)':'rgba(139,92,246,0.3)'}">
+          <i class="bi bi-pencil${canEdit?'-slash':''}"></i> ${canEdit?'سحب التعديل':'منح التعديل'}
+        </button>` : ''}
+      <button class="btn-sm" onclick="adminAction('${u.username}','delete')"
+        style="background:var(--red-bg);color:var(--red);border-color:rgba(239,68,68,0.3)" title="حذف">
+        <i class="bi bi-trash"></i></button>
     </div>
   </div>`;
 }
 
+async function setEditPerm(usernames, canEdit){
+  const label = canEdit ? 'منح صلاحية التعديل' : 'سحب صلاحية التعديل';
+  if(!confirm(`هل تريد ${label} لـ ${usernames.length} مستخدم؟`)) return;
+  const r = await fetch('/api/admin/set_edit_permission', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({usernames, can_edit: canEdit})
+  });
+  const d = await r.json();
+  if(d.ok){
+    showToast(`تم ${label} لـ ${d.updated} مستخدم`, 'success');
+    loadAdminUsers();
+  } else {
+    showToast('حدث خطأ', 'error');
+  }
+}
+
 async function adminAction(username, action){
   if(action==='delete' && !confirm(`هل تريد حذف حساب "${username}"؟`)) return;
-  const r = await fetch('/api/admin/approve', {
+  const r = await fetch('/api/admin/approve',{
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({username, action})
   });
   const d = await r.json();
   if(d.ok){
-    showToast(action==='approve'?'تمت الموافقة على الحساب':action==='delete'?'تم حذف الحساب':'تم الرفض', 'success');
+    showToast(action==='approve'?'تمت الموافقة':action==='delete'?'تم الحذف':'تم الرفض','success');
     loadAdminUsers();
   }
 }
@@ -1593,25 +1764,26 @@ function onSI(){
   if(q.length<1){ closeAC(); return; }
   tmr = setTimeout(()=>{
     fetch('/api/search?q='+encodeURIComponent(q))
-      .then(r=>r.json()).then(items=>{
+      .then(r=>r.json())
+      .then(items=>{
         aci=items; idx=-1;
-        const ac = document.getElementById('ac');
+        const ac=document.getElementById('ac');
         if(!items.length){ ac.style.display='none'; return; }
-        ac.innerHTML = items.map((n,i)=>
+        ac.innerHTML=items.map((n,i)=>
           `<div class="aci" onmousedown="pick(${i})"><i class="bi bi-building"></i><span>${n}</span></div>`).join('');
         ac.style.display='block';
       });
-  }, 180);
+  },180);
 }
 function pick(i){ document.getElementById('si').value=aci[i]; closeAC(); loadInst(aci[i]); }
 function closeAC(){ document.getElementById('ac').style.display='none'; }
 function onKey(e){
-  const els = document.querySelectorAll('.aci');
-  if(e.key==='ArrowDown')    { idx=Math.min(idx+1,els.length-1); hilite(els); }
-  else if(e.key==='ArrowUp') { idx=Math.max(idx-1,0);            hilite(els); }
+  const els=document.querySelectorAll('.aci');
+  if(e.key==='ArrowDown')   { idx=Math.min(idx+1,els.length-1); hilite(els); }
+  else if(e.key==='ArrowUp'){ idx=Math.max(idx-1,0);            hilite(els); }
   else if(e.key==='Enter'){
     if(idx>=0) pick(idx);
-    else{ const q=document.getElementById('si').value.trim(); if(aci.length===1) pick(0); else if(q) loadInst(q); }
+    else { const q=document.getElementById('si').value.trim(); if(aci.length===1)pick(0); else if(q)loadInst(q); }
   }
   else if(e.key==='Escape') closeAC();
 }
@@ -1620,23 +1792,24 @@ document.addEventListener('click',e=>{ if(!e.target.closest('.sw')) closeAC(); }
 
 /* ══ LOAD INSTITUTION ══ */
 function loadInst(name){
-  document.getElementById('res').innerHTML =
+  document.getElementById('res').innerHTML=
     '<div class="empty"><i class="bi bi-arrow-repeat" style="animation:spin 1s linear infinite;display:block;margin-bottom:.9rem;font-size:40px"></i><p>جاري التحميل...</p></div>';
   fetch('/api/institution?name='+encodeURIComponent(name))
-    .then(r=>r.json()).then(data=>{
+    .then(r=>r.json())
+    .then(data=>{
       if(data.error){ showEmptyRes('لم يتم العثور على المؤسسة'); return; }
       render(data); showFab();
     }).catch(()=>showEmptyRes('حدث خطأ أثناء التحميل'));
 }
 function showEmptyRes(msg){
-  document.getElementById('res').innerHTML =
+  document.getElementById('res').innerHTML=
     `<div class="empty"><i class="bi bi-exclamation-circle"></i><p>${msg}</p></div>`;
 }
 
 /* ══ BADGE ══ */
 function badge(s){
   s=s||'';
-  if(/مستعمل|مشغول|مشغولة/.test(s)) return `<span class="badge bg">مشغول</span>`;
+  if(/مستعمل|مشغول|مشغولة/.test(s)) return `<span class="badge bg">مستعمل للسكن</span>`;
   if(/محتل/.test(s))                 return `<span class="badge br">محتل</span>`;
   if(/شاغر|فارغ/.test(s))            return `<span class="badge ba">شاغر</span>`;
   if(/إصلاح|تعطل/.test(s))           return `<span class="badge bv">إصلاح</span>`;
@@ -1650,11 +1823,6 @@ function render(data){
     ? '<span class="chip chip-w"><i class="bi bi-tree"></i>قروي</span>'
     : '<span class="chip chip-w"><i class="bi bi-buildings"></i>حضري</span>';
 
-  const editBtn = _role==='admin'
-    ? `<td><div style="display:flex;gap:5px">
-        <button class="btn-sm" onclick="event.stopPropagation();sd(${JSON.stringify(arguments).replace(/'/g,"&#39;")})"><i class="bi bi-eye"></i> القاطن</button>
-       </div></td>` : `<td></td>`;
-
   const rows = housing.map((h,i)=>{
     const hj = JSON.stringify(h).replace(/'/g,"&#39;");
     const hasEdit = h._edit_log && h._edit_log.length;
@@ -1666,10 +1834,10 @@ function render(data){
       <td>${h.etat||'—'}</td>
       <td>${badge(h.statut)}</td>
       <td>
-        <div style="display:flex;gap:5px">
+        <div style="display:flex;gap:5px;align-items:center">
           <button class="btn-sm" onclick="event.stopPropagation();sd(${hj})"><i class="bi bi-eye"></i> القاطن</button>
-          ${_role==='admin'?`<button class="btn-sm edit" onclick="event.stopPropagation();openEdit(${hj})"><i class="bi bi-pencil"></i></button>`:''}
-          ${hasEdit?`<span style="width:8px;height:8px;border-radius:50%;background:var(--violet);display:inline-block;margin-top:4px" title="تم التعديل"></span>`:''}
+          ${_canEdit?`<button class="btn-sm edit" onclick="event.stopPropagation();openEdit(${hj})"><i class="bi bi-pencil"></i></button>`:''}
+          ${hasEdit?`<span style="width:8px;height:8px;border-radius:50%;background:var(--violet);display:inline-block" title="تم التعديل"></span>`:''}
         </div>
       </td>
     </tr>`;
@@ -1691,7 +1859,7 @@ function render(data){
     </div>
     <div class="inst-stats">
       <div class="ist"><div class="n" style="color:var(--primary)">${stats.total}</div><div class="l">إجمالي</div></div>
-      <div class="ist"><div class="n" style="color:var(--green)">${stats.occupied}</div><div class="l">مشغول</div></div>
+      <div class="ist"><div class="n" style="color:var(--green)">${stats.occupied}</div><div class="l">مستعمل للسكن</div></div>
       <div class="ist"><div class="n" style="color:var(--amber)">${stats.vacant}</div><div class="l">شاغر</div></div>
       <div class="ist"><div class="n" style="color:var(--red)">${stats.illegal||0}</div><div class="l">محتل</div></div>
       <div class="ist"><div class="n" style="color:var(--muted)">${stats.total-stats.occupied-stats.vacant-(stats.illegal||0)}</div><div class="l">أخرى</div></div>
@@ -1713,13 +1881,12 @@ function render(data){
 }
 
 /* ══ OCCUPANT MODAL ══ */
-let _currentH = null;
 function sd(h){
   _currentH = h;
   _editMode = false;
   document.getElementById('mt').textContent = 'معلومات القاطن الحالي';
-  document.getElementById('btnEdit').style.display = _role==='admin' ? '' : 'none';
   document.getElementById('btnEdit').innerHTML = '<i class="bi bi-pencil"></i> تعديل';
+  document.getElementById('btnEdit').style.display = _canEdit ? '' : 'none';
   renderOccupantView(h);
   document.getElementById('ov').classList.add('show');
 }
@@ -1741,13 +1908,13 @@ function renderOccupantView(h){
       </div>`).join('')}` : '';
 
   if(!hasAny){
-    document.getElementById('mb').innerHTML = `
+    document.getElementById('mb').innerHTML=`
       <div class="empty"><i class="bi bi-house-x" style="color:var(--amber)"></i><p>السكنية شاغرة — لا يوجد قاطن</p></div>
       ${logHtml}`;
     return;
   }
-  const sub = [mission,cadre].filter(x=>x&&x!=='—').join(' — ');
-  document.getElementById('mb').innerHTML = `
+  const sub=[mission,cadre].filter(x=>x&&x!=='—').join(' — ');
+  document.getElementById('mb').innerHTML=`
     <div class="occ-header">
       <div class="occ-av"><i class="bi bi-person"></i></div>
       <div><div class="occ-name">${hasOcc?occ:'غير محدد'}</div>${sub?`<div class="occ-sub">${sub}</div>`:''}</div>
@@ -1774,32 +1941,32 @@ function renderOccupantView(h){
     ${logHtml}`;
 }
 
-/* Edit mode */
+/* ══ EDIT MODE ══ */
 function openEdit(h){
-  _currentH = h; _editMode = true;
-  document.getElementById('mt').textContent = 'تعديل بيانات القاطن';
-  document.getElementById('btnEdit').innerHTML = '<i class="bi bi-eye"></i> عرض';
+  _currentH=h; _editMode=true;
+  document.getElementById('mt').textContent='تعديل بيانات القاطن';
+  document.getElementById('btnEdit').innerHTML='<i class="bi bi-eye"></i> عرض';
   renderEditForm(h);
   document.getElementById('ov').classList.add('show');
 }
 
 function toggleEditMode(){
   if(_editMode){
-    _editMode = false;
-    document.getElementById('mt').textContent = 'معلومات القاطن الحالي';
-    document.getElementById('btnEdit').innerHTML = '<i class="bi bi-pencil"></i> تعديل';
+    _editMode=false;
+    document.getElementById('mt').textContent='معلومات القاطن الحالي';
+    document.getElementById('btnEdit').innerHTML='<i class="bi bi-pencil"></i> تعديل';
     renderOccupantView(_currentH);
   } else {
-    _editMode = true;
-    document.getElementById('mt').textContent = 'تعديل بيانات القاطن';
-    document.getElementById('btnEdit').innerHTML = '<i class="bi bi-eye"></i> عرض';
+    _editMode=true;
+    document.getElementById('mt').textContent='تعديل بيانات القاطن';
+    document.getElementById('btnEdit').innerHTML='<i class="bi bi-eye"></i> عرض';
     renderEditForm(_currentH);
   }
 }
 
 function renderEditForm(h){
-  const fields = ['occupant','cadre','mission','statut_occ','num_bail','type_aff','date_occ','statut','notes'];
-  const html = `
+  const fields=['occupant','cadre','mission','statut_occ','num_bail','type_aff','date_occ','statut','notes'];
+  document.getElementById('mb').innerHTML=`
     <div style="background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.2);border-radius:10px;padding:10px 14px;margin-bottom:1rem;font-size:12px;color:var(--violet)">
       <i class="bi bi-info-circle"></i> سيتم تسجيل التعديل بالتاريخ والساعة تلقائياً
     </div>
@@ -1814,68 +1981,58 @@ function renderEditForm(h){
       <button class="btn-sm edit" onclick="saveEdit()" style="padding:9px 20px;font-size:14px">
         <i class="bi bi-check2"></i> حفظ التعديلات
       </button>
-      <button class="btn-sm" onclick="toggleEditMode()" style="padding:9px 20px;font-size:14px">
-        إلغاء
-      </button>
+      <button class="btn-sm" onclick="toggleEditMode()" style="padding:9px 20px;font-size:14px">إلغاء</button>
     </div>`;
-  document.getElementById('mb').innerHTML = html;
 }
 
 async function saveEdit(){
-  const fields = ['occupant','cadre','mission','statut_occ','num_bail','type_aff','date_occ','statut','notes'];
-  const changes = {};
+  const fields=['occupant','cadre','mission','statut_occ','num_bail','type_aff','date_occ','statut','notes'];
+  const changes={};
   fields.forEach(f=>{
-    const el = document.getElementById('ef_'+f);
-    if(el && el.value !== (_currentH[f]||'') && !(el.value==='' && (_currentH[f]==='—'||!_currentH[f]))){
-      changes[f] = el.value;
+    const el=document.getElementById('ef_'+f);
+    if(el && el.value!==(_currentH[f]||'') && !(el.value===''&&(_currentH[f]==='—'||!_currentH[f]))){
+      changes[f]=el.value;
     }
   });
   if(!Object.keys(changes).length){ showToast('لا توجد تغييرات','error'); return; }
-
-  const r = await fetch('/api/edit_occupant', {
+  const r=await fetch('/api/edit_occupant',{
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({gresa:_currentH.gresa, makhzani:_currentH.makhzani, fields:changes})
   });
-  const d = await r.json();
+  const d=await r.json();
   if(d.ok){
-    // update local copy
     Object.assign(_currentH, changes);
-    if(!_currentH._edit_log) _currentH._edit_log = [];
-    _currentH._edit_log.push({timestamp:d.timestamp, admin:'admin', changes});
-    showToast(`تم حفظ التعديلات — ${d.timestamp}`, 'success');
-    _editMode = false;
-    document.getElementById('mt').textContent = 'معلومات القاطن الحالي';
-    document.getElementById('btnEdit').innerHTML = '<i class="bi bi-pencil"></i> تعديل';
+    if(!_currentH._edit_log) _currentH._edit_log=[];
+    _currentH._edit_log.push({timestamp:d.timestamp, admin:_role==='admin'?'admin':'مدير المؤسسة', changes});
+    showToast(`تم حفظ التعديلات — ${d.timestamp}`,'success');
+    _editMode=false;
+    document.getElementById('mt').textContent='معلومات القاطن الحالي';
+    document.getElementById('btnEdit').innerHTML='<i class="bi bi-pencil"></i> تعديل';
     renderOccupantView(_currentH);
-  } else { showToast('فشل الحفظ','error'); }
+  } else { showToast(d.msg||'فشل الحفظ','error'); }
 }
 
 function fieldLabel(f){
-  const m = {occupant:'الاسم الكامل',cadre:'الإطار',mission:'المهمة',
+  const m={occupant:'الاسم الكامل',cadre:'الإطار',mission:'المهمة',
     statut_occ:'وضعية القاطن',num_bail:'رقم التأجير',type_aff:'نوع الإسناد',
     date_occ:'تاريخ الإسناد',statut:'وضعية السكن',notes:'ملاحظات',
     makhzani:'الرقم المخزني',nature:'طبيعة السكن',categorie:'الصنف',
     etat:'الحالة',institution:'المؤسسة',gresa:'GRESA',commune:'الجماعة'};
   return m[f]||f;
 }
-
 function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function cmo(e){ if(!e||e.target===document.getElementById('ov')) document.getElementById('ov').classList.remove('show'); }
 
-function cmo(e){
-  if(!e||e.target===document.getElementById('ov'))
-    document.getElementById('ov').classList.remove('show');
-}
-
-/* ══ VACANT ══ */
+/* ══ VACANT MODAL ══ */
 async function openVacantModal(){
   document.getElementById('ovVacant').classList.add('show');
-  document.getElementById('mbVacant').innerHTML =
+  document.getElementById('mbVacant').innerHTML=
     '<div class="empty"><i class="bi bi-arrow-repeat" style="animation:spin 1s linear infinite;display:block;margin-bottom:.9rem;font-size:36px"></i><p>جاري التحميل...</p></div>';
   document.getElementById('vacantSearch').value='';
-  const r = await fetch('/api/vacant');
-  const d = await r.json();
-  _vacantAll = d.vacant||[];
-  document.getElementById('vacantCount').textContent = _vacantAll.length+' شاغرة';
+  const r=await fetch('/api/vacant');
+  const d=await r.json();
+  _vacantAll=d.vacant||[];
+  document.getElementById('vacantCount').textContent=_vacantAll.length+' شاغرة';
   renderListTable(_vacantAll,'mbVacant');
 }
 function filterVacant(){
@@ -1884,16 +2041,16 @@ function filterVacant(){
 }
 function closeVacant(e){ if(!e||e.target===document.getElementById('ovVacant')) document.getElementById('ovVacant').classList.remove('show'); }
 
-/* ══ ILLEGAL ══ */
+/* ══ ILLEGAL MODAL ══ */
 async function openIllegalModal(){
   document.getElementById('ovIllegal').classList.add('show');
-  document.getElementById('mbIllegal').innerHTML =
+  document.getElementById('mbIllegal').innerHTML=
     '<div class="empty"><i class="bi bi-arrow-repeat" style="animation:spin 1s linear infinite;display:block;margin-bottom:.9rem;font-size:36px"></i><p>جاري التحميل...</p></div>';
   document.getElementById('illegalSearch').value='';
-  const r = await fetch('/api/occupied_illegal');
-  const d = await r.json();
-  _illegalAll = d.illegal||[];
-  document.getElementById('illegalCount').textContent = _illegalAll.length+' سكنية محتلة';
+  const r=await fetch('/api/occupied_illegal');
+  const d=await r.json();
+  _illegalAll=d.illegal||[];
+  document.getElementById('illegalCount').textContent=_illegalAll.length+' سكنية محتلة';
   renderListTable(_illegalAll,'mbIllegal');
 }
 function filterIllegal(){
@@ -1903,7 +2060,10 @@ function filterIllegal(){
 function closeIllegal(e){ if(!e||e.target===document.getElementById('ovIllegal')) document.getElementById('ovIllegal').classList.remove('show'); }
 
 function renderListTable(list, target){
-  if(!list.length){ document.getElementById(target).innerHTML='<div class="empty"><i class="bi bi-check-circle"></i><p>لا توجد نتائج</p></div>'; return; }
+  if(!list.length){
+    document.getElementById(target).innerHTML='<div class="empty"><i class="bi bi-check-circle"></i><p>لا توجد نتائج</p></div>';
+    return;
+  }
   const rows=list.map((h,i)=>`
     <tr class="hr" onclick='sd(${JSON.stringify(h).replace(/'/g,"&#39;")})'>
       <td style="color:var(--muted);font-size:11px;font-family:'IBM Plex Mono',monospace">${i+1}</td>
@@ -1922,13 +2082,65 @@ function renderListTable(list, target){
     </table></div>`;
 }
 
+/* ══ PROFILE ══ */
+async function loadProfile(){
+  const r = await fetch('/api/profile');
+  if(r.status===401) return;
+  const d = await r.json();
+  if(d.error) return;
+  document.getElementById('profHeaderName').textContent = d.name || '—';
+  document.getElementById('profHeaderGresa').textContent = 'GRESA: ' + (d.gresa||'—') + '  ·  رقم التأجير: ' + (d.num_bail||'—');
+  document.getElementById('profileContent').innerHTML=`
+    <div class="readonly-notice">
+      <i class="bi bi-lock-fill" style="color:var(--primary)"></i>
+      البيانات التالية للاطلاع فقط — لا يمكن تعديلها
+    </div>
+    <div class="dg" style="margin-bottom:0">
+      <div class="df"><div class="dl">الاسم الكامل</div><div class="dv">${escHtml(d.name||'—')}</div></div>
+      <div class="df"><div class="dl">كود GRESA</div><div class="dv" style="font-family:'IBM Plex Mono',monospace">${escHtml(d.gresa||'—')}</div></div>
+      <div class="df"><div class="dl">رقم التأجير</div><div class="dv" style="font-family:'IBM Plex Mono',monospace">${escHtml(d.num_bail||'—')}</div></div>
+      <div class="df"><div class="dl">الدور</div><div class="dv"><span class="badge bv"><i class="bi bi-person-badge"></i> مدير مؤسسة</span></div></div>
+    </div>
+    <div class="editable-notice">
+      <i class="bi bi-pencil-square"></i>
+      يمكنك تعديل معلومات الاتصال أدناه
+    </div>
+    <div class="dg">
+      <div class="df">
+        <div class="dl">رقم الهاتف</div>
+        <input class="ef-input" id="profPhone" value="${escHtml(d.phone||'')}" placeholder="0600000000" type="tel"/>
+      </div>
+      <div class="df">
+        <div class="dl">البريد الإلكتروني</div>
+        <input class="ef-input" id="profEmail" value="${escHtml(d.email||'')}" placeholder="exemple@edu.gov.ma" type="email"/>
+      </div>
+    </div>
+    <div style="margin-top:1.2rem;display:flex;gap:10px">
+      <button class="btn-sm edit" onclick="saveProfile()" style="padding:9px 22px;font-size:14px">
+        <i class="bi bi-check2-circle"></i> حفظ التغييرات
+      </button>
+    </div>`;
+}
+
+async function saveProfile(){
+  const phone = document.getElementById('profPhone').value.trim();
+  const email = document.getElementById('profEmail').value.trim();
+  const r = await fetch('/api/profile',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({phone, email})
+  });
+  const d = await r.json();
+  if(d.ok) showToast('تم حفظ معلومات الاتصال بنجاح','success');
+  else showToast('حدث خطأ أثناء الحفظ','error');
+}
+
 /* ══ TOAST ══ */
 function showToast(msg, type='success'){
-  const t = document.createElement('div');
-  t.className = `toast ${type}`;
-  t.innerHTML = `<i class="bi bi-${type==='success'?'check-circle-fill':'exclamation-circle-fill'}"></i> ${msg}`;
+  const t=document.createElement('div');
+  t.className=`toast ${type}`;
+  t.innerHTML=`<i class="bi bi-${type==='success'?'check-circle-fill':'exclamation-circle-fill'}"></i> ${msg}`;
   document.body.appendChild(t);
-  setTimeout(()=>{ t.style.opacity='0'; t.style.transition='opacity 0.3s'; setTimeout(()=>t.remove(),300); }, 3500);
+  setTimeout(()=>{ t.style.opacity='0'; t.style.transition='opacity 0.3s'; setTimeout(()=>t.remove(),300); },3500);
 }
 </script>
 </body>
@@ -1936,7 +2148,8 @@ function showToast(msg, type='success'){
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    from flask import Response
+    return Response(HTML, mimetype='text/html')
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000, use_reloader=False)
